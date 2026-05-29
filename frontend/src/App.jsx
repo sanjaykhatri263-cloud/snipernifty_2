@@ -264,7 +264,7 @@ function AdminPanel({ user, onLogout }) {
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                 {input(newUser.username, v=>setNewUser(p=>({...p,username:v})), "Username *")}
                 {input(newUser.password, v=>setNewUser(p=>({...p,password:v})), "Password *", "password")}
-                {input(newUser.name,     v=>setNewUser(p=>({...p,name:v})),     "Full name")}
+                {input(newUser.name,     v=>setNewUser(p=>({...p,name:v})),      "Full name")}
                 {input(newUser.email,    v=>setNewUser(p=>({...p,email:v})),    "Email")}
               </div>
               <button onClick={createSub} disabled={!newUser.username||!newUser.password}
@@ -642,6 +642,15 @@ function SignalDashboard({ user, onLogout, token }) {
               History table re-labels instantly. {!isAdmin&&"Only the admin can change thresholds — they apply to all users."}
             </div>
           </div>
+
+          {/* LIVE TRADINGVIEW CHART */}
+          {history && history.length > 0 && (
+              <TradingViewChart 
+                  data={history} 
+                  longT={longT} 
+                  shortT={shortT} 
+              />
+          )}
 
           {/* History table */}
           <div style={{background:"rgba(255,255,255,.02)",border:"1px solid rgba(255,255,255,.07)",borderRadius:13,overflow:"hidden"}}>
