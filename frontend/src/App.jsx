@@ -1,3 +1,4 @@
+import TradingViewChart from './TradingViewChart';
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -384,7 +385,14 @@ function AdminPanel({ user, onLogout }) {
               </div>
               <div style={{fontSize:10,color:"#3a4052"}}>Use these sliders to backtest how different thresholds would have performed recently. <br/>This does NOT change the live thresholds for subscribers.</div>
             </div>
-
+            {/* NEW TRADINGVIEW CHART */}
+            {!histTab.loading && histTab.data.length > 0 && (
+                <TradingViewChart 
+                    data={histTab.data} 
+                    longT={simT.long} 
+                    shortT={simT.short} 
+                />
+            )}
             {/* History Simulation Table */}
             <div style={{background:"rgba(255,255,255,.02)",border:"1px solid rgba(255,255,255,.07)",borderRadius:13,overflow:"hidden"}}>
               <div style={{display:"grid",gridTemplateColumns:"140px 100px 100px 90px 90px",padding:"9px 14px",borderBottom:"1px solid rgba(255,255,255,.08)",background:"rgba(255,255,255,.03)"}}>
