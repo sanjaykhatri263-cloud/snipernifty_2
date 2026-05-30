@@ -148,6 +148,33 @@ function AdminPanel({ user, onLogout }) {
     }
   };
 
+  const exportCSV = () => {
+    if (!histTab.data || histTab.data.length === 0) return flash("No data to export");
+    const headers = ["Time (IST)", "Close_Price", "Signal_M1", "Long_Prob_M1", "Short_Prob_M1", "Signal_M2", "Long_Prob_M2", "Short_Prob_M2"];
+    const rows = histTab.data.map(s => {
+       const d = new Date(s.unix * 1000);
+       const timeStr = d.toLocaleString("en-IN", {timeZone:"Asia/Kolkata"}).replace(",", "");
+       
+       let sig1 = "WAIT", sig2 = "WAIT";
+       if(s.prob_long_m1 >= settings.long_thresh && s.prob_long_m1 > s.prob_short_m1) sig1 = "BUY";
+       else if(s.prob_short_m1 >= settings.short_thresh && s.prob_short_m1 > s.prob_long_m1) sig1 = "SELL";
+       
+       if(s.prob_long_m2 >= settings.long_thresh && s.prob_long_m2 > s.prob_short_m2) sig2 = "BUY";
+       else if(s.prob_short_m2 >= settings.short_thresh && s.prob_short_m2 > s.prob_long_m2) sig2 = "SELL";
+
+       return `${timeStr},${s.close},${sig1},${s.prob_long_m1},${s.prob_short_m1},${sig2},${s.prob_long_m2},${s.prob_short_m2}`;
+    });
+    
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nifty_sniper_backtest_${histTab.days}d.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
   useEffect(() => { if (tab === "history" && histTab.data.length === 0) fetchHistory(histTab.days); }, [tab]);
 
   useEffect(() => {
@@ -245,8 +272,9 @@ function AdminPanel({ user, onLogout }) {
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Global Algorithm Data Settings</div>
                 <div style={{display:"flex",gap:8}}>
-                  {[1, 3, 5].map(d => <button key={d} onClick={() => fetchHistory(d)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:histTab.days===d?"rgba(0,229,160,.2)":"rgba(255,255,255,.05)",color:histTab.days===d?"#00e5a0":"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>Fetch {d} Day{d>1?'s':''}</button>)}
+                  {[1, 3, 5, 10, 15, 30].map(d => <button key={d} onClick={() => fetchHistory(d)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:histTab.days===d?"rgba(0,229,160,.2)":"rgba(255,255,255,.05)",color:histTab.days===d?"#00e5a0":"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>Fetch {d} Day{d>1?'s':''}</button>)}
                   <button onClick={() => fetchHistory(histTab.days)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:"rgba(255,255,255,.05)",color:"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>↻ Refresh</button>
+                  <button onClick={exportCSV} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:"rgba(0,229,160,.1)",color:"#00e5a0",border:"1px solid rgba(0,229,160,.3)",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>⬇ Export CSV</button>
                 </div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
