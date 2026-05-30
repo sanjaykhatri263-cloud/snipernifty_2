@@ -18,11 +18,12 @@ const api      = async (path, opts={}) => {
   return res.json();
 };
 
-function computeSig(row, lt, st) {
+function computeSig(row, settings) {
   if (!row) return null;
-  const pl=row.prob_long ?? row.long_prob, ps=row.prob_short ?? row.short_prob;
-  if (pl>=lt && pl>ps)  return "BUY";
-  if (ps>=st && ps>pl)  return "SELL";
+  const pl = settings.sig_mode === 1 ? row.prob_long_m1 : row.prob_long_m2;
+  const ps = settings.sig_mode === 1 ? row.prob_short_m1 : row.prob_short_m2;
+  if (pl >= settings.long_thresh && pl > ps)  return "BUY";
+  if (ps >= settings.short_thresh && ps > pl)  return "SELL";
   return "WAIT";
 }
 
@@ -91,22 +92,27 @@ function AdminPanel({ user, onLogout }) {
   const [breeze, setBreeze]   = useState({api_key:"",api_secret:"",session_token:""});
 
   const [histTab, setHistTab] = useState({ data: [], days: 1, loading: false });
-  const [simT, setSimT] = useState({ long: 80, short: 80, linked: true });
-  
-  // Track backend evaluation mode
-  const [evalMode, setEvalMode] = useState(1);
+  const [settings, setSettings] = useState({ sig_mode: 1, ind_mode: 1, long_thresh: 80, short_thresh: 80 });
+  const [linked, setLinked] = useState(true);
   const wsRef = useRef(null);
 
   const load = async () => {
     try {
       const [s, st, d] = await Promise.all([ api("/admin/subscribers"), api("/admin/stats"), api("/admin/data-source") ]);
       setSubs(s); setStats(st); setDs(d);
-      if (st.eval_mode) setEvalMode(st.eval_mode);
+      if (st.settings) setSettings(st.settings);
     } catch(e) { setMsg("Error: "+e.message); }
   };
 
   useEffect(() => { load(); }, []);
   const flash = (m) => { setMsg(m); setTimeout(()=>setMsg(""),3500); };
+
+  const pushSettings = (newSettings) => {
+    setSettings(newSettings);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "update_settings", data: newSettings }));
+    }
+  };
 
   const createSub = async () => {
     try { await api("/admin/subscribers",{method:"POST",body:JSON.stringify(newUser)}); setNewUser({username:"",password:"",name:"",email:""}); flash("✓ Subscriber created"); load(); }
@@ -144,27 +150,16 @@ function AdminPanel({ user, onLogout }) {
 
   useEffect(() => { if (tab === "history" && histTab.data.length === 0) fetchHistory(histTab.days); }, [tab]);
 
-  // Connect WS just to push Admin Mode changes instantly without refreshing
   useEffect(() => {
     const token = localStorage.getItem("ns_token");
     const ws = new WebSocket(`${WS_URL}?token=${token}`);
     wsRef.current = ws;
     ws.onmessage = ({data}) => {
         const msg = JSON.parse(data);
-        if (msg.type === "eval_mode_changed") {
-            setEvalMode(msg.mode);
-            fetchHistory(histTab.days); // Re-fetch exact history points
-        }
+        if (msg.type === "settings_update") setSettings(msg.data);
     };
     return () => ws.close();
   }, []);
-
-  const changeEvalMode = (mode) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "set_eval_mode", mode }));
-        flash("Rebuilding backend state. Please wait...");
-    }
-  };
 
   const tabStyle = (t) => ({ padding:"8px 16px", fontSize:11, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", letterSpacing:".08em", textTransform:"uppercase", cursor:"pointer", border:"none", borderBottom: tab===t ? "2px solid #00e5a0" : "2px solid transparent", background:"transparent", color: tab===t ? "#00e5a0" : "#5a6478" });
   const input = (val, onChange, placeholder, type="text") => ( <input value={val} onChange={e=>onChange(e.target.value)} type={type} placeholder={placeholder} style={{background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.1)",borderRadius:7,padding:"9px 12px",color:"#e8ecf3",fontSize:12,fontFamily:"'JetBrains Mono',monospace",outline:"none",width:"100%"}} /> );
@@ -184,13 +179,6 @@ function AdminPanel({ user, onLogout }) {
       </header>
 
       <div style={{padding:"20px 24px",display:"flex",flexDirection:"column",gap:16,maxWidth:1000,width:"100%",margin:"0 auto"}}>
-        {stats && (
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12}}>
-            {[{label:"Active sessions", val:stats.connected_users, c:"#00e5a0"},{label:"Signals logged", val:stats.signal_count, c:"#c5ccd8"},{label:"Long threshold", val:stats.thresholds?.long+"%", c:"#00e5a0"},{label:"Short threshold", val:stats.thresholds?.short+"%", c:"#ff4b6e"}].map(s=>(
-              <div key={s.label} style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.07)",borderRadius:10,padding:"12px 14px"}}><div style={{fontSize:10,color:"#5a6478",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>{s.label}</div><div style={{fontSize:22,fontWeight:700,color:s.c,fontFamily:"'JetBrains Mono',monospace"}}>{s.val}</div></div>
-            ))}
-          </div>
-        )}
         {msg && <div style={{background:"rgba(0,229,160,.08)",border:"1px solid rgba(0,229,160,.2)",borderRadius:8,padding:"10px 16px",fontSize:12,color:"#00e5a0",fontFamily:"'JetBrains Mono',monospace"}}>{msg}</div>}
 
         <div style={{borderBottom:"1px solid rgba(255,255,255,.07)",display:"flex",gap:4}}>
@@ -252,59 +240,62 @@ function AdminPanel({ user, onLogout }) {
         {tab === "history" && (
           <div style={{display:"flex",flexDirection:"column",gap:16}}>
             
-            {/* Global Mode Switcher */}
+            {/* Dual Mode Switcher */}
             <div style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.09)",borderRadius:13,padding:"18px 22px",display:"flex",flexDirection:"column",gap:14}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Global Algorithm Mode</div>
-              </div>
-              <div style={{display:"flex",gap:12}}>
-                  <button onClick={() => changeEvalMode(1)} style={{flex:1, padding:"12px", borderRadius:6, background:evalMode===1?"rgba(0,229,160,.1)":"rgba(255,255,255,.03)", border:`1px solid ${evalMode===1?"#00e5a0":"rgba(255,255,255,.1)"}`, color:evalMode===1?"#00e5a0":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>
-                      Mode 1: Classic (Repaints)<br/><span style={{fontSize:10,color:"#5a6478"}}>Aggressive open-candle evaluation.</span>
-                  </button>
-                  <button onClick={() => changeEvalMode(2)} style={{flex:1, padding:"12px", borderRadius:6, background:evalMode===2?"rgba(255,75,110,.1)":"rgba(255,255,255,.03)", border:`1px solid ${evalMode===2?"#ff4b6e":"rgba(255,255,255,.1)"}`, color:evalMode===2?"#ff4b6e":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>
-                      Mode 2: Strict (Locked)<br/><span style={{fontSize:10,color:"#5a6478"}}>100% Repaint-free closed-candle output.</span>
-                  </button>
-              </div>
-            </div>
-
-            <div style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.09)",borderRadius:13,padding:"18px 22px",display:"flex",flexDirection:"column",gap:14}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Historical Simulation Controls</div>
+                <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Global Algorithm Data Settings</div>
                 <div style={{display:"flex",gap:8}}>
-                  {[1, 3, 5].map(d => <button key={d} onClick={() => fetchHistory(d)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:histTab.days===d?"rgba(0,229,160,.2)":"rgba(255,255,255,.05)",color:histTab.days===d?"#00e5a0":"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>{d} Day{d>1?'s':''}</button>)}
+                  {[1, 3, 5].map(d => <button key={d} onClick={() => fetchHistory(d)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:histTab.days===d?"rgba(0,229,160,.2)":"rgba(255,255,255,.05)",color:histTab.days===d?"#00e5a0":"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>Fetch {d} Day{d>1?'s':''}</button>)}
                   <button onClick={() => fetchHistory(histTab.days)} style={{fontSize:10,padding:"4px 10px",borderRadius:4,background:"rgba(255,255,255,.05)",color:"#c5ccd8",border:"none",cursor:"pointer",fontFamily:"'JetBrains Mono',monospace"}}>↻ Refresh</button>
                 </div>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
-                <ThresholdBar label="SIMULATED LONG" val={simT.long} onChange={v => setSimT(p=>({...p, long:v, short: p.linked?v:p.short}))} color="#00e5a0" isAdmin={true}/>
-                <ThresholdBar label="SIMULATED SHORT" val={simT.short} onChange={v => setSimT(p=>({...p, short:v, long: p.linked?v:p.long}))} color="#ff4b6e" isAdmin={true}/>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <div style={{display:"flex", flexDirection:"column", gap:6}}>
+                      <span style={{fontSize:11, color:"#c5ccd8"}}>Top Chart (Buy/Sell Signals)</span>
+                      <div style={{display:"flex",gap:8}}>
+                          <button onClick={() => pushSettings({...settings, sig_mode: 1})} style={{flex:1, padding:"8px", borderRadius:4, background:settings.sig_mode===1?"rgba(0,229,160,.1)":"rgba(255,255,255,.03)", border:`1px solid ${settings.sig_mode===1?"#00e5a0":"rgba(255,255,255,.1)"}`, color:settings.sig_mode===1?"#00e5a0":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>Mode 1 (Repaint)</button>
+                          <button onClick={() => pushSettings({...settings, sig_mode: 2})} style={{flex:1, padding:"8px", borderRadius:4, background:settings.sig_mode===2?"rgba(255,75,110,.1)":"rgba(255,255,255,.03)", border:`1px solid ${settings.sig_mode===2?"#ff4b6e":"rgba(255,255,255,.1)"}`, color:settings.sig_mode===2?"#ff4b6e":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>Mode 2 (Strict)</button>
+                      </div>
+                  </div>
+                  <div style={{display:"flex", flexDirection:"column", gap:6}}>
+                      <span style={{fontSize:11, color:"#c5ccd8"}}>Bottom Chart (Indicator Probabilities)</span>
+                      <div style={{display:"flex",gap:8}}>
+                          <button onClick={() => pushSettings({...settings, ind_mode: 1})} style={{flex:1, padding:"8px", borderRadius:4, background:settings.ind_mode===1?"rgba(0,229,160,.1)":"rgba(255,255,255,.03)", border:`1px solid ${settings.ind_mode===1?"#00e5a0":"rgba(255,255,255,.1)"}`, color:settings.ind_mode===1?"#00e5a0":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>Mode 1 (Repaint)</button>
+                          <button onClick={() => pushSettings({...settings, ind_mode: 2})} style={{flex:1, padding:"8px", borderRadius:4, background:settings.ind_mode===2?"rgba(255,75,110,.1)":"rgba(255,255,255,.03)", border:`1px solid ${settings.ind_mode===2?"#ff4b6e":"rgba(255,255,255,.1)"}`, color:settings.ind_mode===2?"#ff4b6e":"#8892a4", cursor:"pointer", fontFamily:"'JetBrains Mono',monospace"}}>Mode 2 (Strict)</button>
+                      </div>
+                  </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20, marginTop:10}}>
+                <ThresholdBar label="GLOBAL LONG THRESHOLD" val={settings.long_thresh} onChange={v => pushSettings({...settings, long_thresh:v, short_thresh: linked?v:settings.short_thresh})} color="#00e5a0" isAdmin={true}/>
+                <ThresholdBar label="GLOBAL SHORT THRESHOLD" val={settings.short_thresh} onChange={v => pushSettings({...settings, short_thresh:v, long_thresh: linked?v:settings.long_thresh})} color="#ff4b6e" isAdmin={true}/>
               </div>
             </div>
 
             {!histTab.loading && histTab.data.length > 0 && (
-                <TradingViewChart data={histTab.data} longT={simT.long} shortT={simT.short} />
+                <TradingViewChart data={histTab.data} settings={settings} />
             )}
 
             <div style={{background:"rgba(255,255,255,.02)",border:"1px solid rgba(255,255,255,.07)",borderRadius:13,overflow:"hidden"}}>
               <div style={{display:"grid",gridTemplateColumns:"140px 100px 100px 90px 90px",padding:"9px 14px",borderBottom:"1px solid rgba(255,255,255,.08)",background:"rgba(255,255,255,.03)"}}>
-                {["Time (IST)","Price ₹","Sim Signal","Long %","Short %"].map(h=><span key={h} style={{fontSize:10,color:"#5a6478",letterSpacing:".08em",textTransform:"uppercase"}}>{h}</span>)}
+                {["Time (IST)","Price ₹","Signal (Top)","L-Prob (Bot)","S-Prob (Bot)"].map(h=><span key={h} style={{fontSize:10,color:"#5a6478",letterSpacing:".08em",textTransform:"uppercase"}}>{h}</span>)}
               </div>
               <div style={{maxHeight:350,overflowY:"auto"}}>
                 {histTab.loading ? <div style={{padding:"32px 0",textAlign:"center",color:"#5a6478",fontSize:12}}>Loading history from Engine...</div> : histTab.data.length === 0 ? <div style={{padding:"32px 0",textAlign:"center",color:"#5a6478",fontSize:12}}>No history available.</div> : histTab.data.map((s,i) => {
-                   let sig = "WAIT";
-                   if (s.long_prob >= simT.long && s.long_prob > s.short_prob) sig = "BUY";
-                   if (s.short_prob >= simT.short && s.short_prob > s.long_prob) sig = "SELL";
-                   const d = new Date(s.time);
+                   let sig = computeSig(s, settings);
+                   const d = new Date(s.unix * 1000);
                    const tStr = d.toLocaleTimeString("en-IN", {hour:"2-digit",minute:"2-digit", timeZone:"Asia/Kolkata"});
                    const dateStr = d.toLocaleDateString("en-IN", {month:"short", day:"numeric", timeZone:"Asia/Kolkata"});
+                   
+                   const plInd = settings.ind_mode === 1 ? s.prob_long_m1 : s.prob_long_m2;
+                   const psInd = settings.ind_mode === 1 ? s.prob_short_m1 : s.prob_short_m2;
 
                    return (
                      <div key={i} style={{display:"grid",gridTemplateColumns:"140px 100px 100px 90px 90px",padding:"7px 14px",background:i%2===0?"rgba(255,255,255,.018)":"transparent",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:"#8892a4",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,.04)"}}>
                        <span style={{color:"#5a6478"}}>{dateStr} {tStr}</span>
                        <span style={{color:"#c5ccd8",fontWeight:600}}>{fmtPrice(s.close)}</span>
                        <SignalBadge signal={sig}/>
-                       <span style={{color:s.long_prob>=simT.long?"#00e5a0":"#5a6478",fontWeight:s.long_prob>=simT.long?700:400}}>{fmt(s.long_prob)}%</span>
-                       <span style={{color:s.short_prob>=simT.short?"#ff4b6e":"#5a6478",fontWeight:s.short_prob>=simT.short?700:400}}>{fmt(s.short_prob)}%</span>
+                       <span style={{color:plInd>=settings.long_thresh?"#00e5a0":"#5a6478",fontWeight:plInd>=settings.long_thresh?700:400}}>{fmt(plInd)}%</span>
+                       <span style={{color:psInd>=settings.short_thresh?"#ff4b6e":"#5a6478",fontWeight:psInd>=settings.short_thresh?700:400}}>{fmt(psInd)}%</span>
                      </div>
                    );
                 })}
@@ -333,17 +324,22 @@ function Gauge({ label, value, color, threshold }) {
   );
 }
 
-function HistoryRow({ s, i, lt, st }) {
-  const t = new Date(s.timestamp);
-  const timeStr = t.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit", timeZone: "Asia/Kolkata"});
-  const recomputed = computeSig(s,lt,st);
+function HistoryRow({ s, i, settings }) {
+  if(!s.unix) return null;
+  const d = new Date(s.unix * 1000);
+  const timeStr = d.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit", timeZone: "Asia/Kolkata"});
+  const recomputed = computeSig(s, settings);
+  
+  const plInd = settings.ind_mode === 1 ? s.prob_long_m1 : s.prob_long_m2;
+  const psInd = settings.ind_mode === 1 ? s.prob_short_m1 : s.prob_short_m2;
+
   return (
     <div style={{display:"grid",gridTemplateColumns:"80px 90px 80px 65px 65px 56px 70px",padding:"7px 14px",background:i%2===0?"rgba(255,255,255,.018)":"transparent",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:"#8892a4",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,.04)"}}>
       <span style={{color:"#5a6478"}}>{timeStr}</span>
       <span style={{color:"#c5ccd8"}}>{fmtPrice(s.price)}</span>
       <SignalBadge signal={recomputed}/>
-      <span style={{color:s.prob_long>=lt?"#00e5a0":"#5a6478",fontWeight:s.prob_long>=lt?700:400}}>{fmt(s.prob_long)}%</span>
-      <span style={{color:s.prob_short>=st?"#ff4b6e":"#5a6478",fontWeight:s.prob_short>=st?700:400}}>{fmt(s.prob_short)}%</span>
+      <span style={{color:plInd>=settings.long_thresh?"#00e5a0":"#5a6478",fontWeight:plInd>=settings.long_thresh?700:400}}>{fmt(plInd)}%</span>
+      <span style={{color:psInd>=settings.short_thresh?"#ff4b6e":"#5a6478",fontWeight:psInd>=settings.short_thresh?700:400}}>{fmt(psInd)}%</span>
       <span style={{color:s.adx_2m>25?"#f0c040":"#5a6478"}}>{fmt(s.adx_2m)}</span>
       <span style={{fontSize:10,color:s.data_source==="breeze"?"#f0c040":"#3a4052"}}>{s.data_source||"—"}</span>
     </div>
@@ -354,10 +350,7 @@ function SignalDashboard({ user, onLogout, token }) {
   const [latest,  setLatest]  = useState(null);
   const [history, setHistory] = useState([]);
   const [wsState, setWsState] = useState("connecting");
-  const [longT,   setLongT]   = useState(80);
-  const [shortT,  setShortT]  = useState(80);
-  const [linked,  setLinked]  = useState(true);
-  const [evalMode, setEvalMode] = useState(1);
+  const [settings, setSettings] = useState({ sig_mode: 1, ind_mode: 1, long_thresh: 80, short_thresh: 80 });
   const wsRef=useRef(null), rTimer=useRef(null);
   const isAdmin = user.role==="admin";
 
@@ -373,14 +366,17 @@ function SignalDashboard({ user, onLogout, token }) {
       const msg = JSON.parse(data);
       if (msg.type==="signal"){ setLatest(msg.data); setHistory(h=>[msg.data,...h].slice(0,200)); }
       if (msg.type==="history"){ setHistory(msg.data); if(msg.data.length) setLatest(msg.data[0]); }
-      if (msg.type==="eval_mode_changed") setEvalMode(msg.mode);
+      if (msg.type==="settings_update") setSettings(msg.data);
     };
   },[]);
 
   useEffect(()=>{ connect(); return ()=>{ clearTimeout(rTimer.current); wsRef.current?.close(); }; },[connect]);
 
-  const displaySig=computeSig(latest,longT,shortT);
+  const displaySig=computeSig(latest, settings);
   const statusColor={connecting:"#f0c040",open:"#00e5a0",closed:"#ff4b6e"}[wsState];
+  
+  const plInd = settings.ind_mode === 1 ? latest?.prob_long_m1 : latest?.prob_long_m2;
+  const psInd = settings.ind_mode === 1 ? latest?.prob_short_m1 : latest?.prob_short_m2;
 
   return (
     <>
@@ -390,10 +386,11 @@ function SignalDashboard({ user, onLogout, token }) {
           <div style={{display:"flex",alignItems:"center",gap:12}}>
             <div style={{width:28,height:28,borderRadius:7,background:"linear-gradient(135deg,#00e5a0,#00b8d9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:800,color:"#0b0e14"}}>N</div>
             <span style={{fontFamily:"'Syne',sans-serif",fontSize:16,fontWeight:800,color:"#e8ecf3"}}>NIFTY SNIPER</span>
-            <span style={{fontSize:10,color:evalMode===1?"#f0c040":"#00e5a0",border:`1px solid ${evalMode===1?"#f0c040":"#00e5a0"}`,padding:"2px 6px",borderRadius:4}}>MODE {evalMode}</span>
+            <span style={{fontSize:10,color:"#00e5a0",border:`1px solid #00e5a0`,padding:"2px 6px",borderRadius:4}}>Top: M{settings.sig_mode} / Bot: M{settings.ind_mode}</span>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:14}}>
-            <span style={{fontSize:10,color:"#5a6478",fontFamily:"'JetBrains Mono',monospace"}}>{user.name}</span>
+            <span style={{fontSize:10,color:"#5a6478",fontFamily:"'JetBrains Mono',monospace"}}>{user.name} · {user.role}</span>
+            {isAdmin && <span style={{fontSize:10,color:"#f0c040",background:"rgba(240,192,64,.08)",border:"1px solid rgba(240,192,64,.2)",borderRadius:4,padding:"2px 8px"}}>ADMIN</span>}
             <div style={{display:"flex",alignItems:"center",gap:6}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:statusColor,display:"inline-block"}}/>
               <span style={{fontSize:11,color:statusColor}}>{wsState==="open"?"Live":wsState==="connecting"?"Connecting…":"Reconnecting…"}</span>
@@ -404,31 +401,31 @@ function SignalDashboard({ user, onLogout, token }) {
 
         <main style={{flex:1,padding:"20px 24px",display:"flex",flexDirection:"column",gap:16,maxWidth:1100,width:"100%",margin:"0 auto"}}>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
-            <div style={{background:"rgba(255,255,255,.03)",border:`1px solid rgba(255,255,255,.07)`,borderRadius:14,padding:"20px 22px",display:"flex",flexDirection:"column",gap:12}}>
-              <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Current Signal</div>
+            <div style={{background:"rgba(255,255,255,.03)",border:`1px solid ${displaySig?sigColor(displaySig)+"44":"rgba(255,255,255,.07)"}`,borderRadius:14,padding:"20px 22px",display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Current Signal (Mode {settings.sig_mode})</div>
               <SignalBadge signal={displaySig||"—"} large/>
               <div>
                 <div style={{fontSize:26,fontWeight:700,color:"#e8ecf3",letterSpacing:"-.02em"}}>₹ {fmtPrice(latest?.price)}</div>
-                <div style={{fontSize:11,color:"#5a6478",marginTop:3}}>{latest?.timestamp?new Date(latest.timestamp).toLocaleTimeString("en-IN", {timeZone: "Asia/Kolkata"}):"—"}</div>
+                <div style={{fontSize:11,color:"#5a6478",marginTop:3}}>{latest?.unix?new Date(latest.unix*1000).toLocaleTimeString("en-IN", {timeZone: "Asia/Kolkata"}):"—"}</div>
               </div>
             </div>
             <div style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.07)",borderRadius:14,padding:"20px 16px",display:"flex",flexDirection:"column",gap:10}}>
-              <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Brain probabilities</div>
+              <div style={{fontSize:10,color:"#5a6478",letterSpacing:".1em",textTransform:"uppercase"}}>Brain Probabilities (Mode {settings.ind_mode})</div>
               <div style={{display:"flex",justifyContent:"space-around",alignItems:"center",flex:1}}>
-                <Gauge label="Long"  value={latest?.prob_long}  color="#00e5a0" threshold={longT}/>
-                <Gauge label="Short" value={latest?.prob_short} color="#ff4b6e" threshold={shortT}/>
+                <Gauge label="Long"  value={plInd}  color="#00e5a0" threshold={settings.long_thresh}/>
+                <Gauge label="Short" value={psInd} color="#ff4b6e" threshold={settings.short_thresh}/>
               </div>
             </div>
           </div>
 
-          {history && history.length > 0 && <TradingViewChart data={history} longT={longT} shortT={shortT} />}
+          {history && history.length > 0 && <TradingViewChart data={history} settings={settings} />}
 
           <div style={{background:"rgba(255,255,255,.02)",border:"1px solid rgba(255,255,255,.07)",borderRadius:13,overflow:"hidden"}}>
             <div style={{display:"grid",gridTemplateColumns:"80px 90px 80px 65px 65px 56px 70px",padding:"9px 14px",borderBottom:"1px solid rgba(255,255,255,.08)",background:"rgba(255,255,255,.03)"}}>
               {["Time (IST)","Price ₹","Signal","Long %","Short %","ADX","Source"].map(h=><span key={h} style={{fontSize:10,color:"#5a6478",letterSpacing:".08em",textTransform:"uppercase"}}>{h}</span>)}
             </div>
             <div style={{maxHeight:280,overflowY:"auto"}}>
-              {history.map((s,i)=><HistoryRow key={s.timestamp+i} s={s} i={i} lt={longT} st={shortT}/>)}
+              {history.map((s,i)=><HistoryRow key={i} s={s} i={i} settings={settings} />)}
             </div>
           </div>
         </main>
