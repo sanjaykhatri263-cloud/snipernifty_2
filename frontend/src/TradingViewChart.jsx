@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createChart } from 'lightweight-charts';
 
-export default function TradingViewChart({ data, longT, shortT }) {
+export default function TradingViewChart({ data, settings }) {
     const chartContainerRef = useRef();
     const probContainerRef = useRef();
     const [camTF, setCamTF] = useState("15m"); 
 
     useEffect(() => {
-        if (!data || data.length === 0) return;
+        if (!data || data.length === 0 || !settings) return;
 
         // 1. Initialize Main Candlestick Chart
         const chart = createChart(chartContainerRef.current, {
@@ -25,7 +25,7 @@ export default function TradingViewChart({ data, longT, shortT }) {
         const h4Series = chart.addLineSeries({ color: 'rgba(255, 75, 110, 0.5)', lineWidth: 1, lineStyle: 2, title: `H4 (${camTF})` });
         const l4Series = chart.addLineSeries({ color: 'rgba(0, 229, 160, 0.5)', lineWidth: 1, lineStyle: 2, title: `L4 (${camTF})` });
 
-        // 2. Initialize the New Probability & Thresholds Pane
+        // 2. Initialize Probability & Thresholds Pane
         const probChart = createChart(probContainerRef.current, {
             layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8892a4' },
             grid: { vertLines: { color: 'rgba(255, 255, 255, 0.02)' }, horzLines: { color: 'rgba(255, 255, 255, 0.02)' } },
@@ -43,44 +43,41 @@ export default function TradingViewChart({ data, longT, shortT }) {
         chart.timeScale().subscribeVisibleLogicalRangeChange(range => { if (range) probChart.timeScale().setVisibleLogicalRange(range); });
         probChart.timeScale().subscribeVisibleLogicalRangeChange(range => { if (range) chart.timeScale().setVisibleLogicalRange(range); });
 
-        // 3. CRASH PREVENTION: Deduplicate and sort strict IST timestamps
+        // 3. Robust Deduplication and UNIX Sorting
         const uniqueMap = new Map();
-        data.forEach(d => {
-            const timeKey = d.timestamp || d.bar_time || d.time;
-            if (timeKey) uniqueMap.set(timeKey, d);
-        });
+        data.forEach(d => { if (d.unix) uniqueMap.set(d.unix, d); });
         
-        const sortedData = Array.from(uniqueMap.values()).sort((a, b) => {
-            return new Date(a.timestamp || a.time).getTime() - new Date(b.timestamp || b.time).getTime();
-        });
+        const sortedData = Array.from(uniqueMap.values()).sort((a, b) => a.unix - b.unix);
         
-        // 4. Build Payloads
         const candleData = []; const h4Data = []; const l4Data = [];
         const lProbData = []; const sProbData = []; const lThreshData = []; const sThreshData = [];
         const markers = [];
 
         sortedData.forEach(d => {
-            if (d.open === undefined) return; 
-
-            // Safely parse the strict ISO string into UNIX time
-            const time = Math.floor(new Date(d.timestamp || d.time).getTime() / 1000);
+            if (d.open === undefined || isNaN(d.unix)) return; 
+            const time = d.unix; // Pure IST UNIX epoch
             
             candleData.push({ time, open: d.open, high: d.high, low: d.low, close: d.close });
             h4Data.push({ time, value: camTF === "15m" ? d.h4_15m : d.h4_60m });
             l4Data.push({ time, value: camTF === "15m" ? d.l4_15m : d.l4_60m });
 
-            const lp = d.long_prob || d.prob_long;
-            const sp = d.short_prob || d.prob_short;
+            // Dynamic logic routing based on Admin selection!
+            const lpSig = settings.sig_mode === 1 ? d.prob_long_m1 : d.prob_long_m2;
+            const spSig = settings.sig_mode === 1 ? d.prob_short_m1 : d.prob_short_m2;
+            
+            const lpInd = settings.ind_mode === 1 ? d.prob_long_m1 : d.prob_long_m2;
+            const spInd = settings.ind_mode === 1 ? d.prob_short_m1 : d.prob_short_m2;
 
-            lProbData.push({ time, value: lp });
-            sProbData.push({ time, value: sp });
-            lThreshData.push({ time, value: longT });
-            sThreshData.push({ time, value: shortT });
+            lProbData.push({ time, value: lpInd });
+            sProbData.push({ time, value: spInd });
+            lThreshData.push({ time, value: settings.long_thresh });
+            sThreshData.push({ time, value: settings.short_thresh });
 
-            if (lp >= longT && lp > sp) {
-                markers.push({ time, position: 'belowBar', color: '#00e5a0', shape: 'arrowUp', text: `BUY ${lp.toFixed(1)}%` });
-            } else if (sp >= shortT && sp > lp) {
-                markers.push({ time, position: 'aboveBar', color: '#ff4b6e', shape: 'arrowDown', text: `SELL ${sp.toFixed(1)}%` });
+            // Map Arrows dynamically
+            if (lpSig >= settings.long_thresh && lpSig > spSig) {
+                markers.push({ time, position: 'belowBar', color: '#00e5a0', shape: 'arrowUp', text: `BUY ${lpSig.toFixed(1)}%` });
+            } else if (spSig >= settings.short_thresh && spSig > lpSig) {
+                markers.push({ time, position: 'aboveBar', color: '#ff4b6e', shape: 'arrowDown', text: `SELL ${spSig.toFixed(1)}%` });
             }
         });
 
@@ -98,7 +95,7 @@ export default function TradingViewChart({ data, longT, shortT }) {
         probChart.timeScale().fitContent();
 
         return () => { chart.remove(); probChart.remove(); };
-    }, [data, longT, shortT, camTF]);
+    }, [data, settings, camTF]);
 
     return (
         <div style={{ background: 'rgba(11, 14, 20, 0.5)', border: '1px solid rgba(255, 255, 255, 0.07)', borderRadius: '13px', padding: '16px' }}>
@@ -113,8 +110,6 @@ export default function TradingViewChart({ data, longT, shortT }) {
             </div>
             
             <div ref={chartContainerRef} style={{ width: '100%', height: '350px' }} />
-            
-            {/* The new Probabilities Pane */}
             <div ref={probContainerRef} style={{ width: '100%', height: '140px', marginTop: '4px' }} />
         </div>
     );
